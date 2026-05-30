@@ -82,3 +82,47 @@ jobs:
           name: EXIF-Overlay-Tool-mac-v1.1
           path: EXIF-Overlay-Tool-mac-v1.1.zip
           retention-days: 90
+
+  # ── Job 3: Screenshot (runs Python source directly — avoids Gatekeeper) ─────
+  screenshot:
+    name: UI Screenshot (macOS)
+    runs-on: macos-latest
+    needs: test                  # only needs smoke test, not the full build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Launch app and capture screenshot
+        run: |
+          # Launch the app in the background
+          python exif_tool.py &
+          APP_PID=$!
+          echo "App launched with PID $APP_PID"
+
+          # Wait for window to fully load and maximise
+          sleep 12
+
+          # Capture the full screen
+          screencapture -x mac-screenshot.png
+          echo "Screenshot captured"
+
+          # Shut down the app cleanly
+          kill $APP_PID 2>/dev/null || pkill -f "exif_tool" || true
+
+      - name: Upload screenshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-ui-screenshot
+          path: mac-screenshot.png
+          retention-days: 30
