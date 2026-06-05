@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:        # allows manual trigger from GitHub Actions tab
 
+# Use Node.js 24 for all actions (Node.js 20 deprecated, forced from Jun 16 2026)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
 
   # ── Job 1: Smoke test (fast — no compilation) ───────────────────────────────
