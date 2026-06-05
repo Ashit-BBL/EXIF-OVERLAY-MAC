@@ -1,7 +1,7 @@
 """
-EXIF Overlay Tool  v1.1  — Mac-compatible build
+EXIF Overlay Tool  v1.3  — Mac-compatible build
 Burn EXIF data onto photos with full customisation.
-Created by Ashit Gandhi — May 2026
+Created by Ashit Gandhi — June 2026
 Requires: pip install customtkinter pillow
 """
 
@@ -76,7 +76,7 @@ TEXT_COLORS = {
     "Black":  (  0,   0,   0),
 }
 CORNER_OPTIONS = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"]
-STRIP_OPTIONS  = ["Top", "Bottom"]
+STRIP_OPTIONS  = ["Top", "Bottom", "Caption"]
 
 EXIF_FIELD_LABELS = [
     "Camera", "Lens", "Shutter", "Aperture",
@@ -236,18 +236,25 @@ def read_exif(image):
     return fd
 
 
-def _load_font(size):
+def _load_font(size, bold=False):
     """Load a TrueType font at the given size, with platform-aware search paths."""
-    # Windows font filenames
-    win_fonts = ["arial.ttf", "Arial.ttf", "arialbd.ttf", "consola.ttf", "cour.ttf"]
-    # Mac absolute paths (Arial ships with Office; Helvetica is always present)
-    mac_fonts = [
-        "/Library/Fonts/Arial.ttf",
-        "/Library/Fonts/Arial Unicode.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/System/Library/Fonts/Arial.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-    ]
+    if bold:
+        win_fonts = ["arialbd.ttf", "Arial Bold.ttf", "arial.ttf", "Arial.ttf"]
+        mac_fonts = [
+            "/Library/Fonts/Arial Bold.ttf",
+            "/Library/Fonts/Arial.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+        ]
+    else:
+        win_fonts = ["arial.ttf", "Arial.ttf", "arialbd.ttf", "consola.ttf", "cour.ttf"]
+        mac_fonts = [
+            "/Library/Fonts/Arial.ttf",
+            "/Library/Fonts/Arial Unicode.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Arial.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+        ]
     candidates = win_fonts if _IS_WIN else mac_fonts
     for n in candidates:
         try: return ImageFont.truetype(n, size)
@@ -310,8 +317,10 @@ def apply_overlay(img, fields, font_size, color_name, corner,
 
     # ── Single-line mode ──────────────────────────────────────────────────────
     if layout == "Single-line":
-        SEP   = "   |   "
-        max_w = w - 2 * padding          # usable width between left & right margins
+        SEP    = "   |   "
+        max_w  = w - 2 * padding
+        font_b = _load_font(font_size, bold=True)   # bold font for notes
+        lh_b   = dummy.textbbox((0, 0), "Ag", font=font_b)[3]
 
         if fields:
             if show_labels:
@@ -322,8 +331,10 @@ def apply_overlay(img, fields, font_size, color_name, corner,
             # Auto-cap: reduce font until all parts fit in ≤ 3 lines within max_w
             capped = _max_font_for_single_line(parts, max_w, font_size, sep=SEP)
             if capped != font_size:
-                font      = _load_font(capped)
-                lh        = dummy.textbbox((0, 0), "Ag", font=font)[3]
+                font   = _load_font(capped)
+                font_b = _load_font(capped, bold=True)
+                lh     = dummy.textbbox((0, 0), "Ag", font=font)[3]
+                lh_b   = dummy.textbbox((0, 0), "Ag", font=font_b)[3]
 
             full_tw = dummy.textbbox((0, 0), SEP.join(parts), font=font)[2]
             if full_tw <= max_w or len(parts) <= 1:
@@ -345,27 +356,60 @@ def apply_overlay(img, fields, font_size, color_name, corner,
                         current.extend(remaining)
                         remaining = []
                     exif_lines.append(SEP.join(current))
-
-            all_lines = exif_lines + note_lines
         else:
-            all_lines = note_lines
+            exif_lines = []
 
-        total_h = len(all_lines) * (lh + line_spacing) - line_spacing
-        ty = padding if "Top" in corner else h - total_h - padding
+        # ── Caption: black bar added below image ──────────────────────────────
+        if corner == "Caption":
+            all_cap = note_lines + exif_lines       # note always first
+            if not all_cap:
+                return out
 
-        y = ty
-        for line_text in all_lines:
-            tw = dummy.textbbox((0, 0), line_text, font=font)[2]
-            tx = max(padding, (w - tw) // 2)
-            draw.text((tx, y), line_text, font=font, fill=color)
-            y += lh + line_spacing
+            note_h = sum(lh_b + line_spacing for _ in note_lines)
+            exif_h = sum(lh  + line_spacing for _ in exif_lines)
+            bar_h  = note_h + exif_h - line_spacing + 2 * padding
+
+            cap_img = Image.new("RGB", (w, h + bar_h), color=(0, 0, 0))
+            cap_img.paste(out, (0, 0))
+            draw_c  = ImageDraw.Draw(cap_img)
+
+            y = h + padding
+            for i, line_text in enumerate(all_cap):
+                fnt    = font_b if i < len(note_lines) else font
+                cur_lh = lh_b   if i < len(note_lines) else lh
+                tw     = dummy.textbbox((0, 0), line_text, font=fnt)[2]
+                tx     = max(padding, (w - tw) // 2)
+                draw_c.text((tx, y), line_text, font=fnt, fill=(255, 255, 255))
+                y     += cur_lh + line_spacing
+
+            return cap_img
+
+        # ── Top / Bottom overlay ──────────────────────────────────────────────
+        else:
+            all_lines  = note_lines + exif_lines    # note always first
+            note_total = sum(lh_b + line_spacing for _ in note_lines)
+            exif_total = sum(lh  + line_spacing for _ in exif_lines)
+            total_h    = (note_total + exif_total - line_spacing) if all_lines else 0
+
+            ty = padding if "Top" in corner else h - total_h - padding
+            y  = ty
+            for i, line_text in enumerate(all_lines):
+                fnt    = font_b if i < len(note_lines) else font
+                cur_lh = lh_b   if i < len(note_lines) else lh
+                tw     = dummy.textbbox((0, 0), line_text, font=fnt)[2]
+                tx     = max(padding, (w - tw) // 2)
+                draw.text((tx, y), line_text, font=fnt, fill=color)
+                y     += cur_lh + line_spacing
 
     # ── Multi-line mode ───────────────────────────────────────────────────────
     else:
-        GAP  = max(6, font_size // 4)
-        lbls = list(fields.keys())
-        vals = list(fields.values())
+        GAP    = max(6, font_size // 4)
+        lbls   = list(fields.keys())
+        vals   = list(fields.values())
+        font_b = _load_font(font_size, bold=True)
+        lh_b   = dummy.textbbox((0, 0), "Ag", font=font_b)[3]
 
+        # Block width
         if show_labels and lbls:
             mlw = max(dummy.textbbox((0, 0), k, font=font)[2] for k in lbls)
             cw  = dummy.textbbox((0, 0), ":", font=font)[2]
@@ -377,11 +421,14 @@ def apply_overlay(img, fields, font_size, color_name, corner,
             bw  = mvw
 
         if note_lines:
-            nw = max(dummy.textbbox((0, 0), nl, font=font)[2] for nl in note_lines)
+            nw = max(dummy.textbbox((0, 0), nl, font=font_b)[2] for nl in note_lines)
             bw = max(bw, nw)
 
-        total_rows = len(lbls) + len(note_lines)
-        bh = total_rows * (lh + line_spacing) - line_spacing if total_rows else 0
+        # Block height: notes first (bold lh_b), then EXIF fields
+        note_h = len(note_lines) * (lh_b + line_spacing)
+        exif_h = len(lbls)       * (lh   + line_spacing)
+        gap_h  = line_spacing if note_lines and lbls else 0
+        bh     = (note_h + gap_h + exif_h - line_spacing) if (note_lines or lbls) else 0
 
         if   corner == "Top Right":    tx, ty = w - bw - padding, padding
         elif corner == "Top Left":     tx, ty = padding,           padding
@@ -389,6 +436,17 @@ def apply_overlay(img, fields, font_size, color_name, corner,
         else:                          tx, ty = padding,            h - bh - padding
 
         y = ty
+
+        # Notes first — bold
+        for nl in note_lines:
+            draw.text((tx, y), nl, font=font_b, fill=color)
+            y += lh_b + line_spacing
+
+        # Small extra gap between notes and EXIF fields
+        if note_lines and lbls:
+            y += line_spacing
+
+        # EXIF fields
         if show_labels and lbls:
             cx = tx + mlw + GAP
             vx = cx + cw  + GAP
@@ -401,12 +459,6 @@ def apply_overlay(img, fields, font_size, color_name, corner,
             for vl in vals:
                 draw.text((tx, y), vl, font=font, fill=color)
                 y += lh + line_spacing
-
-        if note_lines and lbls:
-            y += line_spacing          # small extra gap before notes
-        for nl in note_lines:
-            draw.text((tx, y), nl, font=font, fill=color)
-            y += lh + line_spacing
 
     return out
 
@@ -424,7 +476,10 @@ def burn_exif(src_path, active_fields, font_size, color_name, corner,
     dest = Path(dest_folder) if dest_folder else p.parent
     out  = dest / (p.stem + "_exif.jpg")
     save_kw = {"quality": 95}
-    if orig_exif: save_kw["exif"] = orig_exif
+    # Only embed original EXIF if image dimensions are unchanged
+    # (Caption mode adds a bar below, making the image taller — EXIF would have wrong dimensions)
+    if orig_exif and res.size == img.size:
+        save_kw["exif"] = orig_exif
     res.save(out, "JPEG", **save_kw)
     return str(out)
 
@@ -522,7 +577,7 @@ class App(ctk.CTk):
 
     def __init__(self):
         super().__init__()
-        self.title("EXIF Overlay Tool  v1.1")
+        self.title("EXIF Overlay Tool  v1.3")
         self.configure(fg_color=C_BG)
         self.resizable(True, True)
         self.minsize(1000, 680)
@@ -537,7 +592,7 @@ class App(ctk.CTk):
         self._orig_size      = (1, 1)
         self._current_idx    = 0
         self._photo_settings = {}
-        self._dest_folder    = None
+        self._dest_folder    = None           # None = same as original
 
         self._field_vars     = {f: ctk.BooleanVar(value=True) for f in EXIF_FIELD_LABELS}
         self._layout_var     = ctk.StringVar(value="Multi-line")
@@ -586,7 +641,7 @@ class App(ctk.CTk):
                      font=ctk.CTkFont("Arial", 20, "bold"),
                      text_color=C_HDR_TEXT, fg_color="transparent"
                      ).place(x=tx, rely=0.30, anchor="w")
-        ctk.CTkLabel(hdr, text="v 1.1",
+        ctk.CTkLabel(hdr, text="v 1.3",
                      font=ctk.CTkFont("Arial", 11),
                      text_color=C_HDR_SUB, fg_color="transparent"
                      ).place(x=tx + 178, rely=0.30, anchor="w")
@@ -599,16 +654,19 @@ class App(ctk.CTk):
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=14, pady=10)
 
+        # LEFT: EXIF field checkboxes (fixed width, no scroll)
         left = ctk.CTkFrame(body, corner_radius=10, fg_color=C_CARD, width=220)
         left.pack(side="left", fill="y", padx=(0, 10))
         left.pack_propagate(False)
         self._build_left_panel(left)
 
+        # RIGHT: Settings panel (fixed width)
         right = ctk.CTkFrame(body, corner_radius=10, fg_color=C_CARD, width=265)
         right.pack(side="right", fill="y")
         right.pack_propagate(False)
         self._build_right_panel(right)
 
+        # CENTRE: Preview + EXIF data
         centre = ctk.CTkFrame(body, fg_color="transparent")
         centre.pack(side="left", fill="both", expand=True)
         self._build_centre_panel(centre)
@@ -650,11 +708,11 @@ class App(ctk.CTk):
         self._status.pack(fill="x", padx=18, pady=(1, 0))
 
         ctk.CTkLabel(self,
-                     text="Created by Ashit Gandhi   •   Ver 1.1   •   May 2026",
+                     text="Created by Ashit Gandhi   •   Ver 1.3   •   June 2026",
                      font=ctk.CTkFont("Arial", 10),
                      text_color=C_DIM, fg_color="transparent").pack(pady=(2, 8))
 
-    # ── Left panel: EXIF field checkboxes ────────────────────────────────────
+    # ── Left panel: EXIF field checkboxes (no scroll) ─────────────────────────
 
     def _build_left_panel(self, parent):
         ctk.CTkLabel(parent, text="EXIF FIELDS",
@@ -705,6 +763,7 @@ class App(ctk.CTk):
     # ── Centre panel: preview + nav + EXIF data box ───────────────────────────
 
     def _build_centre_panel(self, parent):
+        # Preview
         self._thumb_frame = ctk.CTkFrame(parent, corner_radius=10, fg_color=C_CARD)
         self._thumb_frame.pack(fill="both", expand=True)
 
@@ -720,6 +779,7 @@ class App(ctk.CTk):
                                             text_color=C_HDR_TEXT,
                                             fg_color=C_ACCENT, corner_radius=4)
 
+        # Nav bar (hidden until multi-photo)
         self._nav_frame = ctk.CTkFrame(parent, fg_color=C_CARD,
                                         corner_radius=8, height=36)
         self._nav_frame.pack_propagate(False)
@@ -753,6 +813,7 @@ class App(ctk.CTk):
                                              command=self._apply_to_all)
         self._btn_apply_all.place(relx=0.5, rely=0.5, anchor="center")
 
+        # EXIF data box (compact — no scroll, 3 columns)
         ctk.CTkLabel(parent, text="EXIF DATA",
                      font=ctk.CTkFont("Arial", 9, "bold"),
                      text_color=C_LABEL, fg_color="transparent"
@@ -774,6 +835,7 @@ class App(ctk.CTk):
                      text_color=C_LABEL, fg_color="transparent"
                      ).pack(padx=14, anchor="w")
 
+        # ── Layout mode ───────────────────────────────────────────────────────
         lbl("LAYOUT MODE")
         self._layout_seg = ctk.CTkSegmentedButton(parent,
                                values=["Multi-line", "Single-line"],
@@ -785,12 +847,14 @@ class App(ctk.CTk):
                                text_color=C_TEXT, text_color_disabled=C_DIM,
                                command=self._on_layout_btn)
         self._layout_seg.pack(fill="x", padx=12, pady=(4, 0))
-        self._on_layout_btn(self._layout_var.get())
+        self._on_layout_btn(self._layout_var.get())   # set initial text colours
         sep()
 
+        # ── Position (dynamic: corners ↔ top/bottom) ──────────────────────────
         lbl("POSITION")
         self._corner_var = ctk.StringVar(value="Top Right")
 
+        # Multi-line: 4 corners
         self._pos_multi_frame = ctk.CTkFrame(parent, fg_color="transparent")
         self._pos_multi_frame.pack(fill="x", padx=4, pady=(4, 0))
         for c in CORNER_OPTIONS:
@@ -801,9 +865,15 @@ class App(ctk.CTk):
                                radiobutton_width=16, radiobutton_height=16
                                ).pack(anchor="w", padx=14, pady=1)
 
+        # Single-line: Top / Bottom / Caption
+        STRIP_LABELS = {
+            "Top":     "Top  (overlay)",
+            "Bottom":  "Bottom  (overlay)",
+            "Caption": "Bottom  (caption)",
+        }
         self._pos_single_frame = ctk.CTkFrame(parent, fg_color="transparent")
         for s in STRIP_OPTIONS:
-            ctk.CTkRadioButton(self._pos_single_frame, text=f"{s} strip  (centred)",
+            ctk.CTkRadioButton(self._pos_single_frame, text=STRIP_LABELS[s],
                                variable=self._strip_pos_var, value=s,
                                font=ctk.CTkFont("Arial", 12), text_color=C_TEXT,
                                fg_color=C_ACCENT, hover_color=C_HOVER,
@@ -811,6 +881,7 @@ class App(ctk.CTk):
                                ).pack(anchor="w", padx=14, pady=3)
         sep()
 
+        # ── Show labels toggle ────────────────────────────────────────────────
         lbl("TEXT FORMAT")
         lbl_row = ctk.CTkFrame(parent, fg_color="transparent")
         lbl_row.pack(fill="x", padx=12, pady=(4, 0))
@@ -823,6 +894,7 @@ class App(ctk.CTk):
                       ).pack(side="right")
         sep()
 
+        # ── Font size ─────────────────────────────────────────────────────────
         lbl("FONT SIZE")
         srow = ctk.CTkFrame(parent, fg_color="transparent")
         srow.pack(fill="x", padx=12, pady=(4, 0))
@@ -837,6 +909,7 @@ class App(ctk.CTk):
                       command=self._on_slider).pack(side="left", fill="x", expand=True)
         sep()
 
+        # ── Text colour ───────────────────────────────────────────────────────
         lbl("TEXT COLOUR")
         self._color_var = ctk.StringVar(value="White")
         self._color_seg = ctk.CTkSegmentedButton(parent,
@@ -852,6 +925,7 @@ class App(ctk.CTk):
         self._on_color_select("White")
         sep()
 
+        # ── Notes ─────────────────────────────────────────────────────────────
         lbl("NOTES  (max 2 lines)")
         self._notes_box = ctk.CTkTextbox(parent, height=56,
                                           font=ctk.CTkFont("Arial", 12),
@@ -863,6 +937,7 @@ class App(ctk.CTk):
         self._notes_box.bind("<KeyRelease>", self._on_notes_change)
         sep()
 
+        # ── Destination folder ────────────────────────────────────────────────
         lbl("DESTINATION FOLDER")
         ctk.CTkButton(parent, text="📁  Browse…", height=30,
                       font=ctk.CTkFont("Arial", 11),
@@ -1195,4 +1270,9 @@ class App(ctk.CTk):
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    # Accept photo file paths as command-line arguments (e.g. from Lightroom plugin)
+    files_from_cli = [f for f in sys.argv[1:] if os.path.isfile(f)]
+    app = App()
+    if files_from_cli:
+        app.after(800, lambda: app._load(files_from_cli))
+    app.mainloop()
