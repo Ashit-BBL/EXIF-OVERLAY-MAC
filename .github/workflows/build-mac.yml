@@ -31,8 +31,8 @@ jobs:
 
   # ── Job 2: Nuitka build (only runs if smoke test passes) ────────────────────
   build-mac:
-    name: Build .app (macOS)
-    runs-on: macos-latest
+    name: Build .app (macOS Intel x86_64)
+    runs-on: macos-13
     needs: test                # waits for test job to pass
 
     steps:
