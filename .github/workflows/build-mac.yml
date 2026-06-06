@@ -35,8 +35,8 @@ jobs:
 
   # ── Job 2: Nuitka build (only runs if smoke test passes) ────────────────────
   build-mac:
-    name: Build .app (macOS Intel x86_64)
-    runs-on: macos-12
+    name: Build .app (macOS Apple Silicon arm64)
+    runs-on: macos-latest
     needs: test                # waits for test job to pass
 
     steps:
@@ -67,6 +67,9 @@ jobs:
 
       - name: Rename app bundle
         run: mv "dist/exif_tool.app" "dist/EXIF Overlay Tool.app"
+
+      - name: Show architecture
+        run: file "dist/EXIF Overlay Tool.app/Contents/MacOS/exif_tool" || true
 
       - name: Verify .app structure
         run: |
