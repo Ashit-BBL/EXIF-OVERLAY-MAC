@@ -35,7 +35,7 @@ jobs:
 
   # ── Job 2: Nuitka build (only runs if smoke test passes) ────────────────────
   build-mac:
-    name: Build .app (macOS — Intel + Apple Silicon via Rosetta 2)
+    name: Build .app (macOS Apple Silicon — M1/M2/M3/M4)
     runs-on: macos-latest
     needs: test                # waits for test job to pass
 
@@ -62,7 +62,6 @@ jobs:
             --macos-create-app-bundle \
             --macos-app-name="EXIF Overlay Tool" \
             --macos-app-version="1.3" \
-            --macos-target-arch=x86_64 \
             --output-dir=dist \
             exif_tool.py
 
