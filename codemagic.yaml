@@ -1,0 +1,55 @@
+workflows:
+
+  exif-overlay-intel-mac:
+    name: EXIF Overlay Tool — macOS Intel (x86_64)
+    max_build_duration: 60          # minutes — cancel if something hangs
+    instance_type: mac-mini-xcode-15  # Intel Mac builder (x86_64)
+
+    environment:
+      python: "3.12"
+
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+
+    scripts:
+
+      - name: Install dependencies
+        script: |
+          python3 -m pip install --upgrade pip
+          pip3 install -r requirements.txt
+
+      - name: Smoke test
+        script: |
+          python3 test_smoke.py
+
+      - name: Build with Nuitka
+        script: |
+          python3 -m nuitka \
+            --standalone \
+            --enable-plugin=tk-inter \
+            --include-data-files="ashitg - new2 - White.png=ashitg - new2 - White.png" \
+            --macos-create-app-bundle \
+            --macos-app-name="EXIF Overlay Tool" \
+            --macos-app-version="1.3" \
+            --output-dir=dist \
+            exif_tool.py
+
+      - name: Rename app bundle
+        script: |
+          mv "dist/exif_tool.app" "dist/EXIF Overlay Tool.app"
+
+      - name: Verify architecture (must show x86_64)
+        script: |
+          file "dist/EXIF Overlay Tool.app/Contents/MacOS/exif_tool"
+
+      - name: Zip app bundle
+        script: |
+          cd dist
+          zip -r "../EXIF-Overlay-Tool-mac-intel-v1.3.zip" "EXIF Overlay Tool.app"
+
+    artifacts:
+      - EXIF-Overlay-Tool-mac-intel-v1.3.zip
