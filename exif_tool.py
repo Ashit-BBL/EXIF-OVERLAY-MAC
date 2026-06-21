@@ -1,13 +1,13 @@
 """
-EXIF Overlay Tool  v1.3  — Mac-compatible build
+EXIF Overlay Tool  v1.4
 Burn EXIF data onto photos with full customisation.
 Created by Ashit Gandhi — June 2026
 Requires: pip install customtkinter pillow
 """
 
+import json
 import os
 import sys
-import subprocess
 import threading
 
 # Hide the console window immediately on Windows (Nuitka onefile bootstrap creates one)
@@ -16,31 +16,11 @@ if sys.platform == "win32":
     _hwnd = _ctypes.windll.kernel32.GetConsoleWindow()
     if _hwnd:
         _ctypes.windll.user32.ShowWindow(_hwnd, 0)   # SW_HIDE
-
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 import tkinter as _tk
 from tkinter import filedialog, messagebox
-
-# ── Platform helpers ──────────────────────────────────────────────────────────
-_IS_WIN = sys.platform == "win32"
-_IS_MAC = sys.platform == "darwin"
-
-# Monospace font: Consolas on Windows, Menlo on Mac
-MONO_FONT = "Consolas" if _IS_WIN else "Menlo"
-
-# Terminal name for error messages
-_TERMINAL = "PowerShell" if _IS_WIN else "Terminal"
-
-def _open_folder(folder):
-    """Open a folder in the OS file manager, cross-platform."""
-    if _IS_WIN:
-        subprocess.run(["explorer", str(folder)])
-    elif _IS_MAC:
-        subprocess.run(["open", str(folder)])
-    else:
-        subprocess.run(["xdg-open", str(folder)])
 
 try:
     import customtkinter as ctk
@@ -51,24 +31,24 @@ except ImportError as e:
     from tkinter import messagebox
     root = tk.Tk(); root.withdraw()
     messagebox.showerror("Missing library",
-        f"{e}\n\nOpen {_TERMINAL} and run:\n  pip install customtkinter pillow")
+        f"{e}\n\nOpen PowerShell and run:\n  pip install customtkinter pillow")
     sys.exit(1)
 
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("dark-blue")
 
-C_BG       = "#e8e2d0"   # pale greige / lightest swatch
-C_CARD     = "#d4cdb5"   # warm linen
-C_HEADER   = "#38332a"   # very dark khaki-brown
-C_ACCENT   = "#7d7256"   # darkest swatch — khaki-umber
-C_HOVER    = "#625848"   # deeper hover
-C_LABEL    = "#6b614e"   # mid earthy brown
-C_TEXT     = "#2e2a20"   # near-black earth
-C_DIM      = "#a89e84"   # middle swatch — dusty khaki
-C_SEP      = "#bcb49c"   # light mid swatch
-C_PROG     = "#8a7e62"   # 4th swatch — progress bar
-C_HDR_TEXT = "#ffffff"   # white
-C_HDR_SUB  = "#cfc9b4"   # 2nd swatch for subtitle
+C_BG       = "#e8e2d0"
+C_CARD     = "#d4cdb5"
+C_HEADER   = "#38332a"
+C_ACCENT   = "#7d7256"
+C_HOVER    = "#625848"
+C_LABEL    = "#6b614e"
+C_TEXT     = "#2e2a20"
+C_DIM      = "#a89e84"
+C_SEP      = "#bcb49c"
+C_PROG     = "#8a7e62"
+C_HDR_TEXT = "#ffffff"
+C_HDR_SUB  = "#cfc9b4"
 
 TEXT_COLORS = {
     "White":  (255, 255, 255),
@@ -85,10 +65,64 @@ EXIF_FIELD_LABELS = [
     "Date & Time", "Copyright", "GPS",
 ]
 
-LOGO_FILE  = Path(__file__).parent / "ashitg - new2 - White.png"
+_APP_DIR = Path(sys.argv[0]).parent if not sys.argv[0].endswith('.py') else Path(__file__).parent
+LOGO_FILE   = _APP_DIR / "ashitg - new2 - White.png"
+CONFIG_FILE = _APP_DIR / "config.json"
 RENDER_MAX = 2000
 DISPLAY_W  = 1100
 DISPLAY_H  = 650
+
+# Font size slider is calibrated to this longest-edge reference (px).
+# Each image's font is scaled by (its longest edge / FONT_REF_LONG_EDGE) so
+# portrait and landscape frames from the same camera look visually identical.
+FONT_REF_LONG_EDGE = 6000
+
+_IS_MAC = sys.platform == "darwin"
+_IS_WIN = sys.platform == "win32"
+MONO_FONT = "Menlo" if _IS_MAC else ("Consolas" if _IS_WIN else "DejaVu Sans Mono")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  System font discovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SYSTEM_FONTS_CACHE = None   # {display_name: absolute_path}
+
+def _scan_system_fonts():
+    """Walk OS font directories and return {stem_name: path} for all TTF/OTF files."""
+    dirs = []
+    if sys.platform == "win32":
+        windir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+        dirs.append(windir / "Fonts")
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            dirs.append(Path(local) / "Microsoft" / "Windows" / "Fonts")
+    elif sys.platform == "darwin":
+        dirs = [
+            Path("/Library/Fonts"),
+            Path("/System/Library/Fonts"),
+            Path.home() / "Library" / "Fonts",
+        ]
+    else:
+        dirs = [Path("/usr/share/fonts"), Path.home() / ".fonts"]
+
+    fonts = {}
+    for d in dirs:
+        if not d.exists():
+            continue
+        for f in sorted(d.rglob("*")):
+            if f.suffix.lower() in (".ttf", ".otf") and f.is_file():
+                if f.stem not in fonts:           # first path wins
+                    fonts[f.stem] = str(f)
+    return fonts
+
+
+def get_system_fonts():
+    """Return cached {name: path} dict of all system fonts."""
+    global _SYSTEM_FONTS_CACHE
+    if _SYSTEM_FONTS_CACHE is None:
+        _SYSTEM_FONTS_CACHE = _scan_system_fonts()
+    return _SYSTEM_FONTS_CACHE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -236,26 +270,31 @@ def read_exif(image):
     return fd
 
 
-def _load_font(size, bold=False):
-    """Load a TrueType font at the given size, with platform-aware search paths."""
+def _load_font(size, bold=False, family=None):
+    """Load a PIL font. family can be a system font stem name or None for Arial."""
+    sys_fonts = get_system_fonts()
+
+    if family and family != "Arial (Default)":
+        # 1. Exact name in scanned system fonts dict
+        if family in sys_fonts:
+            try: return ImageFont.truetype(sys_fonts[family], size)
+            except (IOError, OSError): pass
+        # 2. Bold variant suffixes
+        if bold:
+            for suffix in ("bd", " Bold", "B", "-Bold"):
+                candidate = family + suffix
+                if candidate in sys_fonts:
+                    try: return ImageFont.truetype(sys_fonts[candidate], size)
+                    except (IOError, OSError): pass
+        # 3. Try treating family as a direct path / PIL-resolvable name
+        try: return ImageFont.truetype(family, size)
+        except (IOError, OSError): pass
+
+    # Default: Arial / system fallback
     if bold:
-        win_fonts = ["arialbd.ttf", "Arial Bold.ttf", "arial.ttf", "Arial.ttf"]
-        mac_fonts = [
-            "/Library/Fonts/Arial Bold.ttf",
-            "/Library/Fonts/Arial.ttf",
-            "/System/Library/Fonts/Helvetica.ttc",
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
-        ]
+        candidates = ["arialbd.ttf", "Arial Bold.ttf", "arial.ttf", "Arial.ttf"]
     else:
-        win_fonts = ["arial.ttf", "Arial.ttf", "arialbd.ttf", "consola.ttf", "cour.ttf"]
-        mac_fonts = [
-            "/Library/Fonts/Arial.ttf",
-            "/Library/Fonts/Arial Unicode.ttf",
-            "/System/Library/Fonts/Helvetica.ttc",
-            "/System/Library/Fonts/Arial.ttf",
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
-        ]
-    candidates = win_fonts if _IS_WIN else mac_fonts
+        candidates = ["arial.ttf", "Arial.ttf", "arialbd.ttf", "consola.ttf", "cour.ttf"]
     for n in candidates:
         try: return ImageFont.truetype(n, size)
         except (IOError, OSError): pass
@@ -263,17 +302,16 @@ def _load_font(size, bold=False):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Core overlay  (layout, show_labels, notes all new)
+#  Core overlay
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _max_font_for_single_line(parts, max_w, requested,
-                               sep="   |   ", min_size=12, max_lines=3):
-    """Binary-search for the largest font size ≤ requested where every
-    greedy-wrapped line fits within max_w pixels (max max_lines lines)."""
+                               sep="   |   ", min_size=12, max_lines=3,
+                               font_family=None):
     _draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
 
     def fits(fs):
-        f   = _load_font(fs)
+        f   = _load_font(fs, family=font_family)
         rem = list(parts)
         n   = 0
         while rem:
@@ -282,7 +320,7 @@ def _max_font_for_single_line(parts, max_w, requested,
                 if _draw.textbbox((0, 0), sep.join(cur + [rem[0]]), font=f)[2] <= max_w:
                     cur.append(rem.pop(0))
                 else:
-                    if not cur:          # even one field is wider than max_w
+                    if not cur:
                         return False
                     break
             n += 1
@@ -302,13 +340,14 @@ def _max_font_for_single_line(parts, max_w, requested,
 
 def apply_overlay(img, fields, font_size, color_name, corner,
                   layout="Multi-line", show_labels=True, notes="",
+                  font_family=None,
                   padding=48, line_spacing=10):
     note_lines = [l for l in notes.strip().split("\n")[:2] if l.strip()]
     if not fields and not note_lines:
         return img.copy()
 
     out   = img.copy().convert("RGB")
-    font  = _load_font(font_size)
+    font  = _load_font(font_size)                          # EXIF data — always Arial
     color = TEXT_COLORS.get(color_name, (255, 255, 255))
     draw  = ImageDraw.Draw(out)
     dummy = ImageDraw.Draw(Image.new("RGB", (1, 1)))
@@ -319,7 +358,7 @@ def apply_overlay(img, fields, font_size, color_name, corner,
     if layout == "Single-line":
         SEP    = "   |   "
         max_w  = w - 2 * padding
-        font_b = _load_font(font_size, bold=True)   # bold font for notes
+        font_b = _load_font(font_size, bold=True, family=font_family)
         lh_b   = dummy.textbbox((0, 0), "Ag", font=font_b)[3]
 
         if fields:
@@ -328,13 +367,16 @@ def apply_overlay(img, fields, font_size, color_name, corner,
             else:
                 parts = list(fields.values())
 
-            # Auto-cap: reduce font until all parts fit in ≤ 3 lines within max_w
-            capped = _max_font_for_single_line(parts, max_w, font_size, sep=SEP)
-            if capped != font_size:
-                font   = _load_font(capped)
-                font_b = _load_font(capped, bold=True)
-                lh     = dummy.textbbox((0, 0), "Ag", font=font)[3]
-                lh_b   = dummy.textbbox((0, 0), "Ag", font=font_b)[3]
+            # Caption mode: bar height is dynamic so no need to shrink the font —
+            # just let text wrap to as many lines as required.
+            if corner != "Caption":
+                capped = _max_font_for_single_line(parts, max_w, font_size,
+                                                   sep=SEP, font_family=None)
+                if capped != font_size:
+                    font   = _load_font(capped)                            # EXIF — always Arial
+                    font_b = _load_font(capped, bold=True, family=font_family)
+                    lh     = dummy.textbbox((0, 0), "Ag", font=font)[3]
+                    lh_b   = dummy.textbbox((0, 0), "Ag", font=font_b)[3]
 
             full_tw = dummy.textbbox((0, 0), SEP.join(parts), font=font)[2]
             if full_tw <= max_w or len(parts) <= 1:
@@ -342,7 +384,10 @@ def apply_overlay(img, fields, font_size, color_name, corner,
             else:
                 exif_lines = []
                 remaining  = list(parts)
-                while remaining and len(exif_lines) < 3:
+                # Caption mode: unlimited lines — bar grows to fit.
+                # Other modes: cap at 3 lines to stay within image bounds.
+                max_wrap = None if corner == "Caption" else 3
+                while remaining:
                     current = []
                     while remaining:
                         candidate = SEP.join(current + [remaining[0]])
@@ -352,7 +397,8 @@ def apply_overlay(img, fields, font_size, color_name, corner,
                             if not current:
                                 current.append(remaining.pop(0))
                             break
-                    if len(exif_lines) == 2 and remaining:
+                    # On the last allowed line (non-Caption), dump remaining fields
+                    if max_wrap and len(exif_lines) == max_wrap - 1 and remaining:
                         current.extend(remaining)
                         remaining = []
                     exif_lines.append(SEP.join(current))
@@ -361,7 +407,7 @@ def apply_overlay(img, fields, font_size, color_name, corner,
 
         # ── Caption: black bar added below image ──────────────────────────────
         if corner == "Caption":
-            all_cap = note_lines + exif_lines       # note always first
+            all_cap = note_lines + exif_lines
             if not all_cap:
                 return out
 
@@ -386,7 +432,7 @@ def apply_overlay(img, fields, font_size, color_name, corner,
 
         # ── Top / Bottom overlay ──────────────────────────────────────────────
         else:
-            all_lines  = note_lines + exif_lines    # note always first
+            all_lines  = note_lines + exif_lines
             note_total = sum(lh_b + line_spacing for _ in note_lines)
             exif_total = sum(lh  + line_spacing for _ in exif_lines)
             total_h    = (note_total + exif_total - line_spacing) if all_lines else 0
@@ -406,10 +452,9 @@ def apply_overlay(img, fields, font_size, color_name, corner,
         GAP    = max(6, font_size // 4)
         lbls   = list(fields.keys())
         vals   = list(fields.values())
-        font_b = _load_font(font_size, bold=True)
+        font_b = _load_font(font_size, bold=True, family=font_family)
         lh_b   = dummy.textbbox((0, 0), "Ag", font=font_b)[3]
 
-        # Block width
         if show_labels and lbls:
             mlw = max(dummy.textbbox((0, 0), k, font=font)[2] for k in lbls)
             cw  = dummy.textbbox((0, 0), ":", font=font)[2]
@@ -424,7 +469,6 @@ def apply_overlay(img, fields, font_size, color_name, corner,
             nw = max(dummy.textbbox((0, 0), nl, font=font_b)[2] for nl in note_lines)
             bw = max(bw, nw)
 
-        # Block height: notes first (bold lh_b), then EXIF fields
         note_h = len(note_lines) * (lh_b + line_spacing)
         exif_h = len(lbls)       * (lh   + line_spacing)
         gap_h  = line_spacing if note_lines and lbls else 0
@@ -437,16 +481,13 @@ def apply_overlay(img, fields, font_size, color_name, corner,
 
         y = ty
 
-        # Notes first — bold
         for nl in note_lines:
             draw.text((tx, y), nl, font=font_b, fill=color)
             y += lh_b + line_spacing
 
-        # Small extra gap between notes and EXIF fields
         if note_lines and lbls:
             y += line_spacing
 
-        # EXIF fields
         if show_labels and lbls:
             cx = tx + mlw + GAP
             vx = cx + cw  + GAP
@@ -464,20 +505,26 @@ def apply_overlay(img, fields, font_size, color_name, corner,
 
 
 def burn_exif(src_path, active_fields, font_size, color_name, corner,
-              layout="Multi-line", show_labels=True, notes="", dest_folder=None):
+              layout="Multi-line", show_labels=True, notes="",
+              font_family=None, dest_folder=None):
     p    = Path(src_path).resolve()
     img  = Image.open(p)
     orig_exif = img.info.get("exif", b"")
     img  = img.convert("RGB")
     all_f = read_exif(img)
     f    = {k: v for k, v in all_f.items() if k in active_fields}
-    res  = apply_overlay(img, f, font_size, color_name, corner,
-                         layout=layout, show_labels=show_labels, notes=notes)
+
+    # Normalise font size by longest edge so portrait vs landscape frames
+    # from the same camera get visually identical text weight.
+    long_edge = max(img.width, img.height)
+    adj_font  = max(8, round(font_size * long_edge / FONT_REF_LONG_EDGE))
+
+    res  = apply_overlay(img, f, adj_font, color_name, corner,
+                         layout=layout, show_labels=show_labels, notes=notes,
+                         font_family=font_family)
     dest = Path(dest_folder) if dest_folder else p.parent
     out  = dest / (p.stem + "_exif.jpg")
     save_kw = {"quality": 95}
-    # Only embed original EXIF if image dimensions are unchanged
-    # (Caption mode adds a bar below, making the image taller — EXIF would have wrong dimensions)
     if orig_exif and res.size == img.size:
         save_kw["exif"] = orig_exif
     res.save(out, "JPEG", **save_kw)
@@ -577,7 +624,7 @@ class App(ctk.CTk):
 
     def __init__(self):
         super().__init__()
-        self.title("EXIF Overlay Tool  v1.3")
+        self.title("EXIF Overlay Tool  v1.4")
         self.configure(fg_color=C_BG)
         self.resizable(True, True)
         self.minsize(1000, 680)
@@ -592,14 +639,16 @@ class App(ctk.CTk):
         self._orig_size      = (1, 1)
         self._current_idx    = 0
         self._photo_settings = {}
-        self._dest_folder    = None           # None = same as original
+        self._dest_folder    = None
 
-        self._field_vars     = {f: ctk.BooleanVar(value=True) for f in EXIF_FIELD_LABELS}
-        self._layout_var     = ctk.StringVar(value="Multi-line")
-        self._strip_pos_var  = ctk.StringVar(value="Bottom")
+        self._field_vars      = {f: ctk.BooleanVar(value=True) for f in EXIF_FIELD_LABELS}
+        self._layout_var      = ctk.StringVar(value="Multi-line")
+        self._strip_pos_var   = ctk.StringVar(value="Bottom")
         self._show_labels_var = ctk.BooleanVar(value=True)
+        self._font_family_var = ctk.StringVar(value="Arial (Default)")
 
         self._build_ui()
+        self._apply_config()           # restore saved defaults before first use
 
         # traces that trigger live preview
         for var in self._field_vars.values():
@@ -608,14 +657,16 @@ class App(ctk.CTk):
         self._layout_var.trace_add("write", self._on_layout_change)
         self._strip_pos_var.trace_add("write", self._schedule_preview)
         self._show_labels_var.trace_add("write", self._schedule_preview)
+        self._font_family_var.trace_add("write", self._schedule_preview)
 
-        # Start maximised — platform-aware
-        if _IS_WIN:
-            self.after(0, lambda: self.state("zoomed"))
-        elif _IS_MAC:
-            self.after(0, lambda: self.attributes("-zoomed", True))
-        else:
-            self.after(0, lambda: self.attributes("-zoomed", True))
+        # Save config 1 second after any global setting changes
+        for var in (self._corner_var, self._layout_var, self._strip_pos_var,
+                    self._show_labels_var, self._font_family_var, self._font_val,
+                    self._color_var):
+            var.trace_add("write", self._schedule_config_save)
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(0, lambda: self.state("zoomed"))
 
     # ══════════════════════════════════════════════════════════════════════════
     #  UI BUILD
@@ -641,7 +692,7 @@ class App(ctk.CTk):
                      font=ctk.CTkFont("Arial", 20, "bold"),
                      text_color=C_HDR_TEXT, fg_color="transparent"
                      ).place(x=tx, rely=0.30, anchor="w")
-        ctk.CTkLabel(hdr, text="v 1.3",
+        ctk.CTkLabel(hdr, text="v 1.4",
                      font=ctk.CTkFont("Arial", 11),
                      text_color=C_HDR_SUB, fg_color="transparent"
                      ).place(x=tx + 178, rely=0.30, anchor="w")
@@ -654,19 +705,16 @@ class App(ctk.CTk):
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=14, pady=10)
 
-        # LEFT: EXIF field checkboxes (fixed width, no scroll)
         left = ctk.CTkFrame(body, corner_radius=10, fg_color=C_CARD, width=220)
         left.pack(side="left", fill="y", padx=(0, 10))
         left.pack_propagate(False)
         self._build_left_panel(left)
 
-        # RIGHT: Settings panel (fixed width)
         right = ctk.CTkFrame(body, corner_radius=10, fg_color=C_CARD, width=265)
         right.pack(side="right", fill="y")
         right.pack_propagate(False)
         self._build_right_panel(right)
 
-        # CENTRE: Preview + EXIF data
         centre = ctk.CTkFrame(body, fg_color="transparent")
         centre.pack(side="left", fill="both", expand=True)
         self._build_centre_panel(centre)
@@ -695,7 +743,6 @@ class App(ctk.CTk):
                                            state="disabled", command=self._run)
         self._btn_process.pack(side="left", expand=True, fill="x")
 
-        # ── Status + credits ──────────────────────────────────────────────────
         self._save_info = ctk.CTkLabel(self, text="",
                      font=ctk.CTkFont("Arial", 11),
                      text_color=C_LABEL, fg_color="transparent", anchor="w")
@@ -708,11 +755,11 @@ class App(ctk.CTk):
         self._status.pack(fill="x", padx=18, pady=(1, 0))
 
         ctk.CTkLabel(self,
-                     text="Created by Ashit Gandhi   •   Ver 1.3   •   June 2026",
+                     text="Created by Ashit Gandhi   •   Ver 1.4   •   June 2026",
                      font=ctk.CTkFont("Arial", 10),
                      text_color=C_DIM, fg_color="transparent").pack(pady=(2, 8))
 
-    # ── Left panel: EXIF field checkboxes (no scroll) ─────────────────────────
+    # ── Left panel ────────────────────────────────────────────────────────────
 
     def _build_left_panel(self, parent):
         ctk.CTkLabel(parent, text="EXIF FIELDS",
@@ -760,10 +807,9 @@ class App(ctk.CTk):
                              checkbox_width=18, checkbox_height=18, corner_radius=4
                              ).pack(anchor="w", padx=12, pady=2)
 
-    # ── Centre panel: preview + nav + EXIF data box ───────────────────────────
+    # ── Centre panel ──────────────────────────────────────────────────────────
 
     def _build_centre_panel(self, parent):
-        # Preview
         self._thumb_frame = ctk.CTkFrame(parent, corner_radius=10, fg_color=C_CARD)
         self._thumb_frame.pack(fill="both", expand=True)
 
@@ -779,7 +825,13 @@ class App(ctk.CTk):
                                             text_color=C_HDR_TEXT,
                                             fg_color=C_ACCENT, corner_radius=4)
 
-        # Nav bar (hidden until multi-photo)
+        self._btn_close_sel = ctk.CTkButton(self._thumb_frame, text="✕",
+                                             font=ctk.CTkFont("Arial", 11, "bold"),
+                                             width=28, height=28, corner_radius=6,
+                                             fg_color=C_HEADER, hover_color="#5a5040",
+                                             text_color=C_HDR_TEXT,
+                                             command=self._close_selection)
+
         self._nav_frame = ctk.CTkFrame(parent, fg_color=C_CARD,
                                         corner_radius=8, height=36)
         self._nav_frame.pack_propagate(False)
@@ -813,7 +865,6 @@ class App(ctk.CTk):
                                              command=self._apply_to_all)
         self._btn_apply_all.place(relx=0.5, rely=0.5, anchor="center")
 
-        # EXIF data box (compact — no scroll, 3 columns)
         ctk.CTkLabel(parent, text="EXIF DATA",
                      font=ctk.CTkFont("Arial", 9, "bold"),
                      text_color=C_LABEL, fg_color="transparent"
@@ -826,16 +877,17 @@ class App(ctk.CTk):
                                              fg_color=C_CARD, progress_color=C_PROG)
         self._progress.set(0); self._progress.pack_forget()
 
-    # ── Right panel: all settings ─────────────────────────────────────────────
+    # ── Right panel ───────────────────────────────────────────────────────────
 
     def _build_right_panel(self, parent):
-        def sep(): ctk.CTkFrame(parent, height=1, fg_color=C_SEP).pack(fill="x", padx=12, pady=6)
+        def sep(): ctk.CTkFrame(parent, height=1, fg_color=C_SEP).pack(fill="x", padx=12, pady=3)
         def lbl(t): ctk.CTkLabel(parent, text=t,
-                     font=ctk.CTkFont("Arial", 11, "bold"),
+                     font=ctk.CTkFont("Arial", 10, "bold"),
                      text_color=C_LABEL, fg_color="transparent"
                      ).pack(padx=14, anchor="w")
 
         # ── Layout mode ───────────────────────────────────────────────────────
+        ctk.CTkFrame(parent, height=6, fg_color="transparent").pack()
         lbl("LAYOUT MODE")
         self._layout_seg = ctk.CTkSegmentedButton(parent,
                                values=["Multi-line", "Single-line"],
@@ -846,26 +898,24 @@ class App(ctk.CTk):
                                unselected_color=C_SEP, unselected_hover_color=C_CARD,
                                text_color=C_TEXT, text_color_disabled=C_DIM,
                                command=self._on_layout_btn)
-        self._layout_seg.pack(fill="x", padx=12, pady=(4, 0))
-        self._on_layout_btn(self._layout_var.get())   # set initial text colours
+        self._layout_seg.pack(fill="x", padx=12, pady=(2, 0))
+        self._on_layout_btn(self._layout_var.get())
         sep()
 
-        # ── Position (dynamic: corners ↔ top/bottom) ──────────────────────────
+        # ── Position ──────────────────────────────────────────────────────────
         lbl("POSITION")
         self._corner_var = ctk.StringVar(value="Top Right")
 
-        # Multi-line: 4 corners
         self._pos_multi_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        self._pos_multi_frame.pack(fill="x", padx=4, pady=(4, 0))
+        self._pos_multi_frame.pack(fill="x", padx=4, pady=(2, 0))
         for c in CORNER_OPTIONS:
             ctk.CTkRadioButton(self._pos_multi_frame, text=c,
                                variable=self._corner_var, value=c,
-                               font=ctk.CTkFont("Arial", 12), text_color=C_TEXT,
+                               font=ctk.CTkFont("Arial", 11), text_color=C_TEXT,
                                fg_color=C_ACCENT, hover_color=C_HOVER,
-                               radiobutton_width=16, radiobutton_height=16
-                               ).pack(anchor="w", padx=14, pady=1)
+                               radiobutton_width=15, radiobutton_height=15
+                               ).pack(anchor="w", padx=14, pady=0)
 
-        # Single-line: Top / Bottom / Caption
         STRIP_LABELS = {
             "Top":     "Top  (overlay)",
             "Bottom":  "Bottom  (overlay)",
@@ -875,16 +925,16 @@ class App(ctk.CTk):
         for s in STRIP_OPTIONS:
             ctk.CTkRadioButton(self._pos_single_frame, text=STRIP_LABELS[s],
                                variable=self._strip_pos_var, value=s,
-                               font=ctk.CTkFont("Arial", 12), text_color=C_TEXT,
+                               font=ctk.CTkFont("Arial", 11), text_color=C_TEXT,
                                fg_color=C_ACCENT, hover_color=C_HOVER,
-                               radiobutton_width=16, radiobutton_height=16
-                               ).pack(anchor="w", padx=14, pady=3)
+                               radiobutton_width=15, radiobutton_height=15
+                               ).pack(anchor="w", padx=14, pady=1)
         sep()
 
         # ── Show labels toggle ────────────────────────────────────────────────
         lbl("TEXT FORMAT")
         lbl_row = ctk.CTkFrame(parent, fg_color="transparent")
-        lbl_row.pack(fill="x", padx=12, pady=(4, 0))
+        lbl_row.pack(fill="x", padx=12, pady=(2, 0))
         ctk.CTkLabel(lbl_row, text="Show field labels",
                      font=ctk.CTkFont("Arial", 12), text_color=C_TEXT,
                      fg_color="transparent").pack(side="left")
@@ -897,16 +947,54 @@ class App(ctk.CTk):
         # ── Font size ─────────────────────────────────────────────────────────
         lbl("FONT SIZE")
         srow = ctk.CTkFrame(parent, fg_color="transparent")
-        srow.pack(fill="x", padx=12, pady=(4, 0))
+        srow.pack(fill="x", padx=12, pady=(2, 0))
         self._font_val = ctk.IntVar(value=40)
         self._font_lbl = ctk.CTkLabel(srow, text="40 pt",
                                        font=ctk.CTkFont("Arial", 12),
                                        text_color=C_TEXT, fg_color="transparent", width=44)
         self._font_lbl.pack(side="right")
-        ctk.CTkSlider(srow, from_=16, to=80, variable=self._font_val,
+        ctk.CTkSlider(srow, from_=30, to=120, variable=self._font_val,
                       fg_color=C_SEP, progress_color=C_ACCENT,
                       button_color=C_LABEL, button_hover_color="#a89060",
                       command=self._on_slider).pack(side="left", fill="x", expand=True)
+        sep()
+
+        # ── Notes font (regional language support) ────────────────────────────
+        lbl("NOTES FONT")
+        # Search entry
+        self._font_search_var = ctk.StringVar()
+        ctk.CTkEntry(parent,
+                     textvariable=self._font_search_var,
+                     placeholder_text="Search fonts…",
+                     font=ctk.CTkFont("Arial", 11),
+                     fg_color=C_BG, text_color=C_TEXT,
+                     border_color=C_SEP, border_width=1,
+                     height=28
+                     ).pack(fill="x", padx=12, pady=(2, 2))
+        self._font_search_var.trace_add("write", self._on_font_search)
+
+        # Native Listbox — supports mouse-wheel scrolling and live filtering
+        self._all_font_names = ["Arial (Default)"] + sorted(get_system_fonts().keys())
+        lb_frame = _tk.Frame(parent, bg=C_CARD)
+        lb_frame.pack(fill="x", padx=12, pady=(0, 0))
+        sb = _tk.Scrollbar(lb_frame, orient="vertical")
+        self._font_listbox = _tk.Listbox(
+            lb_frame, height=4,
+            yscrollcommand=sb.set,
+            font=("Arial", 11),
+            bg=C_BG, fg=C_TEXT,
+            selectbackground=C_ACCENT, selectforeground="#ffffff",
+            activestyle="none",
+            borderwidth=0, highlightthickness=1,
+            highlightbackground=C_SEP, highlightcolor=C_ACCENT,
+            relief="flat")
+        sb.config(command=self._font_listbox.yview)
+        self._font_listbox.pack(side="left", fill="x", expand=True)
+        sb.pack(side="right", fill="y")
+        self._font_listbox.bind("<<ListboxSelect>>", self._on_font_listbox_select)
+        self._font_listbox.bind("<MouseWheel>",
+            lambda e: self._font_listbox.yview_scroll(-1*(e.delta//120), "units"))
+        self._populate_font_listbox("")
         sep()
 
         # ── Text colour ───────────────────────────────────────────────────────
@@ -921,19 +1009,19 @@ class App(ctk.CTk):
                                unselected_color=C_SEP, unselected_hover_color=C_CARD,
                                text_color=C_TEXT, text_color_disabled=C_DIM,
                                command=self._on_color_select)
-        self._color_seg.pack(fill="x", padx=12, pady=(6, 0))
+        self._color_seg.pack(fill="x", padx=12, pady=(2, 0))
         self._on_color_select("White")
         sep()
 
-        # ── Notes ─────────────────────────────────────────────────────────────
-        lbl("NOTES  (max 2 lines)")
-        self._notes_box = ctk.CTkTextbox(parent, height=56,
+        # ── Notes (per photo) ─────────────────────────────────────────────────
+        lbl("NOTES  (per photo · max 2 lines)")
+        self._notes_box = ctk.CTkTextbox(parent, height=44,
                                           font=ctk.CTkFont("Arial", 12),
                                           fg_color=C_BG, text_color=C_TEXT,
                                           corner_radius=6,
                                           scrollbar_button_color=C_CARD,
                                           scrollbar_button_hover_color=C_CARD)
-        self._notes_box.pack(fill="x", padx=12, pady=(4, 0))
+        self._notes_box.pack(fill="x", padx=12, pady=(2, 0))
         self._notes_box.bind("<KeyRelease>", self._on_notes_change)
         sep()
 
@@ -943,12 +1031,75 @@ class App(ctk.CTk):
                       font=ctk.CTkFont("Arial", 11),
                       fg_color=C_SEP, hover_color=C_CARD, text_color=C_TEXT,
                       corner_radius=6, command=self._pick_dest_folder
-                      ).pack(fill="x", padx=12, pady=(6, 2))
+                      ).pack(fill="x", padx=12, pady=(2, 2))
         self._dest_lbl = ctk.CTkLabel(parent, text="Same folder as original",
                                        font=ctk.CTkFont("Arial", 10),
                                        text_color=C_DIM, fg_color="transparent",
                                        wraplength=220, anchor="w")
         self._dest_lbl.pack(fill="x", padx=14)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  Config persistence
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _apply_config(self):
+        try:
+            cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if "font_size" in cfg:
+            self._font_val.set(cfg["font_size"])
+            self._font_lbl.configure(text=f"{cfg['font_size']} pt")
+        if "color" in cfg:
+            self._color_var.set(cfg["color"])
+            self._on_color_select(cfg["color"])
+        if "layout" in cfg:
+            self._layout_var.set(cfg["layout"])
+            self._on_layout_btn(cfg["layout"])
+            self._on_layout_change()   # trace not yet wired at startup — swap frames manually
+        if "corner" in cfg:
+            self._corner_var.set(cfg["corner"])
+        if "strip_pos" in cfg:
+            self._strip_pos_var.set(cfg["strip_pos"])
+        if "show_labels" in cfg:
+            self._show_labels_var.set(cfg["show_labels"])
+        if "font_family" in cfg:
+            self._font_family_var.set(cfg["font_family"])
+            self._font_selecting = True
+            self._font_search_var.set(cfg["font_family"])
+            self._font_selecting = False
+            self._populate_font_listbox("")
+        if "fields" in cfg:
+            for f, v in cfg["fields"].items():
+                if f in self._field_vars:
+                    self._field_vars[f].set(v)
+
+    def _save_config(self):
+        cfg = {
+            "font_size":   int(self._font_val.get()),
+            "color":       self._color_var.get(),
+            "layout":      self._layout_var.get(),
+            "corner":      self._corner_var.get(),
+            "strip_pos":   self._strip_pos_var.get(),
+            "show_labels": self._show_labels_var.get(),
+            "font_family": self._font_family_var.get(),
+            "fields":      {f: v.get() for f, v in self._field_vars.items()},
+        }
+        try:
+            CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    _config_timer = None
+
+    def _schedule_config_save(self, *_):
+        if self._config_timer is not None:
+            self.after_cancel(self._config_timer)
+        self._config_timer = self.after(1000, self._save_config)
+
+    def _on_close(self):
+        self._save_config()
+        self.destroy()
 
     # ══════════════════════════════════════════════════════════════════════════
     #  Event handlers
@@ -978,6 +1129,40 @@ class App(ctk.CTk):
     def _on_color_select(self, selected):
         for name, btn in self._color_seg._buttons_dict.items():
             btn.configure(text_color="#ffffff" if name == selected else C_TEXT)
+        self._schedule_preview()
+
+    def _populate_font_listbox(self, query=""):
+        self._font_listbox.delete(0, "end")
+        names = (self._all_font_names if not query
+                 else ["Arial (Default)"] + [
+                     n for n in self._all_font_names[1:] if query in n.lower()])
+        for name in names:
+            self._font_listbox.insert("end", name)
+        current = self._font_family_var.get()
+        for i, name in enumerate(names):
+            if name == current:
+                self._font_listbox.selection_clear(0, "end")
+                self._font_listbox.selection_set(i)
+                self._font_listbox.see(i)
+                break
+
+    _font_selecting = False   # guard against search↔select feedback loop
+
+    def _on_font_search(self, *_):
+        if self._font_selecting:
+            return
+        self._populate_font_listbox(self._font_search_var.get().lower().strip())
+
+    def _on_font_listbox_select(self, event):
+        sel = self._font_listbox.curselection()
+        if not sel:
+            return
+        name = self._font_listbox.get(sel[0])
+        self._font_family_var.set(name)
+        # Show selected name in the search box without re-filtering the list
+        self._font_selecting = True
+        self._font_search_var.set(name)
+        self._font_selecting = False
         self._schedule_preview()
 
     def _on_notes_change(self, *_):
@@ -1028,6 +1213,22 @@ class App(ctk.CTk):
             self._nav_frame.pack_forget()
         self._show_photo(0)
         self._btn_process.configure(state="normal")
+        self._btn_close_sel.place(relx=1.0, x=-6, y=6, anchor="ne")
+
+    def _close_selection(self):
+        if self._preview_timer is not None:
+            self.after_cancel(self._preview_timer); self._preview_timer = None
+        self._files = []; self._current_idx = 0; self._photo_settings = {}
+        self._render_base = None; self._preview_exif = {}
+        self._nav_frame.pack_forget()
+        self._thumb_lbl.place_forget()
+        self._preview_badge.place_forget()
+        self._notes_box.delete("1.0", "end")
+        for w in self._exif_grid.winfo_children(): w.destroy()
+        self._btn_process.configure(state="disabled")
+        self._btn_close_sel.place_forget()
+        self._save_info.configure(text="")
+        self._status.configure(text="Select photo(s) or a folder to begin.")
 
     # ══════════════════════════════════════════════════════════════════════════
     #  Navigation
@@ -1045,6 +1246,15 @@ class App(ctk.CTk):
             self._color_var.set(s["color"])
             self._on_color_select(s["color"])
             self._corner_var.set(s["corner"])
+            fam = s.get("font_family", "Arial (Default)")
+            self._font_family_var.set(fam)
+            self._font_selecting = True
+            self._font_search_var.set(fam)
+            self._font_selecting = False
+            self._populate_font_listbox("")
+            # Per-photo notes: restore each photo's own label text
+            self._notes_box.delete("1.0", "end")
+            self._notes_box.insert("1.0", s.get("notes", ""))
         self._nav_label.configure(text=f"Photo {idx+1} of {total}")
         self._btn_prev.configure(state="normal" if idx > 0       else "disabled")
         self._btn_next.configure(state="normal" if idx < total-1 else "disabled")
@@ -1066,10 +1276,12 @@ class App(ctk.CTk):
         if not self._files: return
         path = self._files[self._current_idx]
         self._photo_settings[path] = {
-            "fields":    {f: v.get() for f, v in self._field_vars.items()},
-            "font_size": int(self._font_val.get()),
-            "color":     self._color_var.get(),
-            "corner":    self._corner_var.get(),
+            "fields":      {f: v.get() for f, v in self._field_vars.items()},
+            "font_size":   int(self._font_val.get()),
+            "color":       self._color_var.get(),
+            "corner":      self._corner_var.get(),
+            "font_family": self._font_family_var.get(),
+            "notes":       self._notes_box.get("1.0", "end-1c"),
         }
 
     def _nav_prev(self):
@@ -1079,11 +1291,18 @@ class App(ctk.CTk):
         self._save_current_settings(); self._show_photo(self._current_idx + 1)
 
     def _apply_to_all(self):
+        """Copy EXIF fields, font size/family, colour, and position to all photos.
+        Notes are intentionally excluded — species/location labels differ per photo."""
         self._save_current_settings()
         base = self._photo_settings.get(self._files[self._current_idx])
         if not base: return
-        for p in self._files: self._photo_settings[p] = dict(base)
-        self._status.configure(text="✓  Current settings applied to all photos.")
+        shared_keys = ("fields", "font_size", "color", "corner", "font_family")
+        shared = {k: base[k] for k in shared_keys if k in base}
+        for p in self._files:
+            existing_notes = self._photo_settings.get(p, {}).get("notes", "")
+            self._photo_settings[p] = {**shared, "notes": existing_notes}
+        self._status.configure(
+            text="✓  Settings applied to all photos  (notes kept per-photo).")
 
     # ══════════════════════════════════════════════════════════════════════════
     #  Live preview
@@ -1097,11 +1316,10 @@ class App(ctk.CTk):
             rb = img.copy()
             rb.thumbnail((RENDER_MAX, RENDER_MAX), Image.LANCZOS)
             self._render_base = rb
+            self._render_preview()
         except Exception:
             self._render_base = None; self._preview_exif = {}
             self._thumb_lbl.configure(image=None, text="(preview unavailable)")
-            return
-        self._render_preview()
 
     def _schedule_preview(self, *_):
         if self._preview_timer is not None:
@@ -1112,21 +1330,28 @@ class App(ctk.CTk):
         if self._render_base is None: return
         active = [f for f, v in self._field_vars.items() if v.get()]
         fields = {k: v for k, v in self._preview_exif.items() if k in active}
-        scale        = self._render_base.width / self._orig_size[0]
-        prev_font    = max(6, round(int(self._font_val.get()) * scale))
-        prev_pad     = max(4, round(48 * scale))
-        prev_spacing = max(2, round(10 * scale))
+
+        # thumbnail → original scale factor
+        scale = self._render_base.width / self._orig_size[0]
+        # apply same longest-edge normalisation as burn_exif so preview matches output
+        long_edge  = max(self._orig_size)
+        ref_scale  = long_edge / FONT_REF_LONG_EDGE
+        prev_font  = max(6, round(int(self._font_val.get()) * ref_scale * scale))
+        prev_pad   = max(4, round(48 * scale))
+        prev_spc   = max(2, round(10 * scale))
+
         layout      = self._layout_var.get()
         corner      = (self._corner_var.get() if layout == "Multi-line"
                        else self._strip_pos_var.get())
         notes       = self._notes_box.get("1.0", "end-1c")
         show_labels = self._show_labels_var.get()
+        font_family = self._font_family_var.get()
 
         result = apply_overlay(self._render_base, fields, prev_font,
                                self._color_var.get(), corner,
                                layout=layout, show_labels=show_labels,
-                               notes=notes,
-                               padding=prev_pad, line_spacing=prev_spacing)
+                               notes=notes, font_family=font_family,
+                               padding=prev_pad, line_spacing=prev_spc)
         display = result.copy()
         fw = max(400, self._thumb_frame.winfo_width()  - 20)
         fh = max(300, self._thumb_frame.winfo_height() - 20)
@@ -1134,6 +1359,7 @@ class App(ctk.CTk):
         self._thumb_ref = ctk.CTkImage(light_image=display, dark_image=display,
                                         size=display.size)
         self._thumb_lbl.configure(image=self._thumb_ref, text="")
+        self._thumb_lbl.place(relx=0.5, rely=0.5, anchor="center")
         self._preview_badge.place(x=6, y=6)
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1149,7 +1375,7 @@ class App(ctk.CTk):
 
         if not fields:
             _tk.Label(self._exif_grid, text="  No EXIF data found in this file.",
-                      font=(MONO_FONT, 10), fg=C_DIM, bg=C_CARD, pady=4
+                      font=("Consolas", 10), fg=C_DIM, bg=C_CARD, pady=4
                       ).pack(anchor="w", padx=8)
             return
 
@@ -1168,13 +1394,13 @@ class App(ctk.CTk):
                 tick       = "+" if active else "-"
                 row = _tk.Frame(parent, bg=C_CARD)
                 row.pack(fill="x")
-                _tk.Label(row, text=tick, font=(MONO_FONT, 10, "bold"),
+                _tk.Label(row, text=tick, font=("Consolas", 10, "bold"),
                           fg=tick_color, bg=C_CARD, pady=0, padx=0, width=2
                           ).pack(side="left", padx=(4, 2))
-                _tk.Label(row, text=f"{k:<14}", font=(MONO_FONT, 10),
+                _tk.Label(row, text=f"{k:<14}", font=("Consolas", 10),
                           fg=C_LABEL, bg=C_CARD, pady=0
                           ).pack(side="left")
-                _tk.Label(row, text=v, font=(MONO_FONT, 10),
+                _tk.Label(row, text=v, font=("Consolas", 10),
                           fg=C_TEXT, bg=C_CARD, pady=0
                           ).pack(side="left", padx=(2, 8))
 
@@ -1194,29 +1420,35 @@ class App(ctk.CTk):
 
     def _run(self):
         self._save_current_settings()
-        default_active = [f for f, v in self._field_vars.items() if v.get()]
-        default_font   = int(self._font_val.get())
-        default_color  = self._color_var.get()
-        default_corner = self._corner_var.get()
-        layout      = self._layout_var.get()
-        show_labels = self._show_labels_var.get()
-        notes       = self._notes_box.get("1.0", "end-1c")
-        dest_folder = self._dest_folder
+        default_active  = [f for f, v in self._field_vars.items() if v.get()]
+        default_font    = int(self._font_val.get())
+        default_color   = self._color_var.get()
+        default_corner  = self._corner_var.get()
+        default_notes   = self._notes_box.get("1.0", "end-1c")
+        default_family  = self._font_family_var.get()
+        layout          = self._layout_var.get()
+        show_labels     = self._show_labels_var.get()
+        dest_folder     = self._dest_folder
 
         tasks = []
         for path in self._files:
             if path in self._photo_settings:
-                s = self._photo_settings[path]
+                s      = self._photo_settings[path]
                 active = [f for f, on in s["fields"].items() if on]
                 corner = (s["corner"] if layout == "Multi-line"
                           else self._strip_pos_var.get())
-                tasks.append((path, active or default_active,
-                               s["font_size"], s["color"], corner))
+                tasks.append((path,
+                               active or default_active,
+                               s["font_size"],
+                               s["color"],
+                               corner,
+                               s.get("font_family", default_family),
+                               s.get("notes", "")))
             else:
                 corner = (default_corner if layout == "Multi-line"
                           else self._strip_pos_var.get())
                 tasks.append((path, default_active, default_font,
-                               default_color, corner))
+                               default_color, corner, default_family, default_notes))
 
         if not any(t[1] for t in tasks):
             messagebox.showwarning("No fields", "Tick at least one EXIF field.")
@@ -1227,14 +1459,14 @@ class App(ctk.CTk):
         self._progress.set(0)
         threading.Thread(
             target=self._worker,
-            args=(tasks, layout, show_labels, notes, dest_folder),
+            args=(tasks, layout, show_labels, dest_folder),
             daemon=True
         ).start()
 
-    def _worker(self, tasks, layout, show_labels, notes, dest_folder):
+    def _worker(self, tasks, layout, show_labels, dest_folder):
         results, errors = [], []
         total = len(tasks)
-        for i, (path, active, font_sz, color, corner) in enumerate(tasks, 1):
+        for i, (path, active, font_sz, color, corner, font_family, notes) in enumerate(tasks, 1):
             self.after(0, self._status.configure,
                        {"text": f"Processing {i} / {total}  —  {Path(path).name}"})
             self.after(0, self._progress.set, i / total)
@@ -1242,7 +1474,8 @@ class App(ctk.CTk):
                 results.append(
                     burn_exif(path, active, font_sz, color, corner,
                               layout=layout, show_labels=show_labels,
-                              notes=notes, dest_folder=dest_folder)
+                              notes=notes, font_family=font_family,
+                              dest_folder=dest_folder)
                 )
             except Exception as e:
                 errors.append(f"{Path(path).name}: {e}")
@@ -1257,7 +1490,7 @@ class App(ctk.CTk):
             n = len(results)
             self._status.configure(text=f"✓  Saved {n} file{'s' if n>1 else ''}  →  {folder}")
             if messagebox.askyesno("Done!", f"Done!  {n} file{'s' if n>1 else ''} saved.\n\nOpen folder?"):
-                _open_folder(folder)
+                os.startfile(folder)
         else:
             self._status.configure(text="No files were processed.")
 
@@ -1267,10 +1500,11 @@ class App(ctk.CTk):
                                     text="Processing…" if busy else "✨  Process")
         self._btn_files.configure(state=s)
         self._btn_folder.configure(state=s)
+        if busy: self._btn_close_sel.place_forget()
+        elif self._files: self._btn_close_sel.place(relx=1.0, x=-6, y=6, anchor="ne")
 
 
 if __name__ == "__main__":
-    # Accept photo file paths as command-line arguments (e.g. from Lightroom plugin)
     files_from_cli = [f for f in sys.argv[1:] if os.path.isfile(f)]
     app = App()
     if files_from_cli:

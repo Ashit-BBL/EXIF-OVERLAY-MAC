@@ -39,7 +39,7 @@ workflows:
             --include-data-files="ashitg - new2 - White.png=ashitg - new2 - White.png" \
             --macos-create-app-bundle \
             --macos-app-name="EXIF Overlay Tool" \
-            --macos-app-version="1.3" \
+            --macos-app-version="1.4" \
             --macos-target-arch=x86_64 \
             --output-dir=dist \
             exif_tool.py
@@ -55,7 +55,7 @@ workflows:
       - name: Zip app bundle
         script: |
           cd dist
-          zip -r "../EXIF-Overlay-Tool-mac-intel-v1.3.zip" "EXIF Overlay Tool.app"
+          zip -r "../EXIF-Overlay-Tool-mac-intel-v1.4.zip" "EXIF Overlay Tool.app"
 
     artifacts:
-      - EXIF-Overlay-Tool-mac-intel-v1.3.zip
+      - EXIF-Overlay-Tool-mac-intel-v1.4.zip
